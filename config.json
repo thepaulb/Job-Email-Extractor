@@ -1,0 +1,13 @@
+{
+  "gmail_label": "jobs",
+  "keywords": [
+    "technical director",
+    "digital",
+    "website manager",
+    "web team lead",
+    "cybersecurity",
+    "web experience manager"
+  ],
+  "output_folder": "daily_jobs",
+  "lookback_days": 1
+}
