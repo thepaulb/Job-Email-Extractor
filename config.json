@@ -27,5 +27,5 @@
     "UX director"
   ],
   "output_folder": "daily_jobs",
-  "lookback_days": 1
+  "lookback_days": 2
 }

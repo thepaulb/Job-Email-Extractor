@@ -12,7 +12,7 @@ import re
 import base64
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urlencode, parse_qs
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -159,6 +159,9 @@ def extract_links(email_details):
     if email_details["body_html"]:
         soup = BeautifulSoup(email_details["body_html"], "html.parser")
         for a_tag in soup.find_all("a", href=True):
+            # Skip links nested inside another link (e.g. LinkedIn Job Alerts)
+            if a_tag.find_parent("a"):
+                continue
             href = a_tag["href"].strip()
             if href.startswith(("http://", "https://")):
                 link_text = a_tag.get_text(separator=", ", strip=True) or ""
@@ -186,6 +189,26 @@ def matches_keywords(url, link_text, keywords):
         if kw in decoded_url or kw in text_lower:
             return True
     return False
+
+
+def normalize_url(url):
+    """Normalize a URL for deduplication by stripping tracking parameters.
+    For LinkedIn job URLs, extract just the job ID."""
+    parsed = urlparse(url)
+    # LinkedIn job links: extract the job ID from the path
+    linkedin_match = re.search(r'/jobs/view/(\d+)', parsed.path)
+    if linkedin_match:
+        return f"linkedin-job:{linkedin_match.group(1)}"
+    # For other URLs, strip common tracking params
+    tracking_params = {
+        'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+        'trackingId', 'refId', 'trk', 'trkEmail', 'midToken', 'midSig',
+        'lipi', 'eid', 'otpToken',
+    }
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    cleaned_qs = {k: v for k, v in qs.items() if k not in tracking_params}
+    cleaned_url = parsed._replace(query=urlencode(cleaned_qs, doseq=True)).geturl()
+    return cleaned_url
 
 
 def clean_sender(sender):
@@ -244,7 +267,7 @@ def generate_markdown(date_label, entries, output_folder):
                 title = entry["title"] if entry["title"] else "Untitled Link"
                 # Format title if Indeed text contains source 
                 # info (e.g. "Indeed, Software Engineer at XYZ")
-                if "Indeed" in entry['source']:
+                if "Indeed" in entry['source'] or "LinkedIn" in entry['source']:
                     title, *desc = title.split(", ", 1)
                     desc = desc[0].lstrip() if desc else None
   
@@ -308,14 +331,15 @@ def main():
         email_date = parse_email_date(details["date"])
 
         for url, link_text in links:
-            # Skip duplicates
-            if url in seen_urls:
+            # Skip duplicates (using normalized URL for comparison)
+            norm_url = normalize_url(url)
+            if norm_url in seen_urls:
                 continue
 
             # Check keyword match
             for keyword in keywords:
                 if matches_keywords(url, link_text, [keyword]):
-                    seen_urls.add(url)
+                    seen_urls.add(norm_url)
                     all_entries.append({
                         "title": link_text or details["subject"],
                         "url": url,
