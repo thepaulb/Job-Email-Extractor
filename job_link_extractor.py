@@ -219,8 +219,17 @@ def generate_markdown(date_label, entries, output_folder):
     output_dir = SCRIPT_DIR / output_folder
     output_dir.mkdir(exist_ok=True)
 
-    filename = f"jobs_{date_label}.md"
-    filepath = output_dir / filename
+    # Version control: increment if file already exists for today
+    base_filepath = output_dir / f"jobs_{date_label}.md"
+    if not base_filepath.exists():
+        filepath = base_filepath
+    else:
+        version = 2
+        while True:
+            filepath = output_dir / f"jobs_{date_label}_v{version}.md"
+            if not filepath.exists():
+                break
+            version += 1
 
     with open(filepath, "w") as f:
         f.write(f"# Job Opportunities — {date_label}\n\n")
