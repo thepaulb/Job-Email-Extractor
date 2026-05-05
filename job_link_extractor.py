@@ -161,7 +161,7 @@ def extract_links(email_details):
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"].strip()
             if href.startswith(("http://", "https://")):
-                link_text = a_tag.get_text(strip=True) or ""
+                link_text = a_tag.get_text(separator=", ", strip=True) or ""
                 links.add((href, link_text))
 
     # Also extract URLs from plain text as fallback
@@ -229,18 +229,25 @@ def generate_markdown(date_label, entries, output_folder):
             f.write("No matching job links found for this date.\n")
         else:
             f.write(f"**{len(entries)} link(s) found**\n\n---\n\n")
+            
             for i, entry in enumerate(entries, 1):
+                desc = None
                 title = entry["title"] if entry["title"] else "Untitled Link"
-                f.write(f"{json.dumps(entry, indent=2)}\n")
+                # Format title if Indeed text contains source 
+                # info (e.g. "Indeed, Software Engineer at XYZ")
+                if "Indeed" in entry['source']:
+                    title, *desc = title.split(", ", 1)
+                    desc = desc[0].lstrip() if desc else None
+  
                 f.write(f"### {i}. {title}\n\n")
-                f.write(f"- **Link:** [{entry['url'][:80]}...]({entry['url']})\n"
+                f.write(f"**Description:** {desc}\n\n") if desc else "\n\n"
+                f.write(f"- **Source:** {entry['source']}\n")
+                f.write(f"- **Link:** [{title}]({entry['url']})\n"
                         if len(entry['url']) > 80
                         else f"- **Link:** [{entry['url']}]({entry['url']})\n")
-                f.write(f"- **Source:** {entry['source']}\n")
                 f.write(f"- **Date:** {entry['date']}\n")
                 f.write(f"- **Matched keyword:** {entry['matched_keyword']}\n")
                 f.write("\n---\n\n")
-
     return filepath
 
 
