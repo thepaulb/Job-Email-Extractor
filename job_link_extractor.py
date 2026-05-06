@@ -272,7 +272,7 @@ def generate_markdown(date_label, entries, output_folder):
                     desc = desc[0].lstrip() if desc else None
   
                 f.write(f"### {i}. {title}\n\n")
-                f.write(f"**Description:** {desc}\n\n") if desc else "\n\n"
+                f.write(f"**Description:** {desc}\n\n") if desc else "\n"
                 f.write(f"- **Source:** {entry['source']}\n")
                 f.write(f"- **Link:** [{title}]({entry['url']})\n"
                         if len(entry['url']) > 80
