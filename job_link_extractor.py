@@ -71,10 +71,12 @@ def get_label_id(service, label_name):
     return None
 
 
-def fetch_emails(service, label_id, after_date):
-    """Fetch emails with a given label received after a specific date."""
+def fetch_emails(service, label_id, after_date, before_date=None):
+    """Fetch emails with a given label received within a date range."""
     # Gmail query: label + date filter
     query = f"after:{after_date}"
+    if before_date:
+        query += f" before:{before_date}"
     messages = []
     page_token = None
 
@@ -290,16 +292,30 @@ def main():
     output_folder = config.get("output_folder", "daily_jobs")
     lookback_days = config.get("lookback_days", 1)
 
-    # Calculate date range
-    target_date = datetime.now() - timedelta(days=lookback_days)
-    after_date = target_date.strftime("%Y/%m/%d")
-    date_label = datetime.now().strftime("%Y-%m-%d")
+    # Determine date range: test mode or normal
+    test_mode = config.get("test_mode", False)
 
-    print(f"Job Link Extractor")
-    print(f"==================")
+    if test_mode:
+        after_date = config.get("from_date", "")
+        before_date = config.get("to_date", "")
+        if not after_date or not before_date:
+            print("ERROR: test_mode is enabled but from_date or to_date is missing in config.json")
+            sys.exit(1)
+        # Use the date range as the file label
+        date_label = f"{after_date}_to_{before_date}"
+        print(f"Job Link Extractor — TEST MODE")
+        print(f"==============================")
+    else:
+        target_date = datetime.now() - timedelta(days=lookback_days)
+        after_date = target_date.strftime("%Y/%m/%d")
+        before_date = None
+        date_label = datetime.now().strftime("%Y-%m-%d")
+        print(f"Job Link Extractor")
+        print(f"==================")
+
     print(f"Label: {label_name}")
     print(f"Keywords: {', '.join(keywords)}")
-    print(f"Looking for emails after: {after_date}")
+    print(f"Date range: {after_date}{f' to {before_date}' if before_date else ' onwards'}")
     print()
 
     # Authenticate
@@ -316,7 +332,7 @@ def main():
 
     # Fetch emails
     print("Fetching emails...")
-    messages = fetch_emails(service, label_id, after_date)
+    messages = fetch_emails(service, label_id, after_date, before_date)
     print(f"Found {len(messages)} email(s) with label '{label_name}'")
 
     # Process each email
