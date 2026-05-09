@@ -181,14 +181,27 @@ def extract_links(email_details):
 
 
 def matches_keywords(url, link_text, keywords):
-    """Check if a URL or its link text matches any of the keywords."""
-    # Decode the URL for better matching
-    decoded_url = unquote(url).lower()
+    """Check if a URL or its link text matches any of the keywords.
+
+    Uses word-boundary matching on link text to avoid substring false positives
+    (e.g. 'CTO' matching inside 'Director'). For URLs, only matches against
+    readable path segments (hyphen/underscore-separated words), not raw query
+    strings or IDs that may contain random character sequences.
+    """
     text_lower = link_text.lower()
+
+    # Extract readable segments from URL path (e.g. "senior-cto-role" → "senior cto role")
+    parsed = urlparse(unquote(url))
+    # Split path on / - _ to get word-like tokens, ignore purely numeric segments
+    path_words = re.sub(r'[/\-_]+', ' ', parsed.path).lower()
 
     for keyword in keywords:
         kw = keyword.lower()
-        if kw in decoded_url or kw in text_lower:
+        # Use word-boundary regex so "cto" won't match inside "director"
+        pattern = r'(?<![a-z])' + re.escape(kw) + r'(?![a-z])'
+        if re.search(pattern, text_lower):
+            return True
+        if re.search(pattern, path_words):
             return True
     return False
 
