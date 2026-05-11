@@ -314,8 +314,8 @@ def main():
         if not after_date or not before_date:
             print("ERROR: test_mode is enabled but from_date or to_date is missing in config.json")
             sys.exit(1)
-        # Use the date range as the file label
-        date_label = f"{after_date}_to_{before_date}"
+        # Use the date range as the file label (replace slashes with hyphens for filename)
+        date_label = f"{after_date.replace('/', '-')}_to_{before_date.replace('/', '-')}"
         print(f"Job Link Extractor — TEST MODE")
         print(f"==============================")
     else:

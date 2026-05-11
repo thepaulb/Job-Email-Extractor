@@ -31,7 +31,7 @@
   ],
   "output_folder": "daily_jobs",
   "lookback_days": 1,
-  "test_mode": false,
-  "from_date": "2026/05/01",
-  "to_date": "2026/05/09"
+  "test_mode": true,
+  "from_date": "2026/05/04",
+  "to_date": "2026/05/11"
 }
