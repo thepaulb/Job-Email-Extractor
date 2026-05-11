@@ -226,6 +226,53 @@ def normalize_url(url):
     return cleaned_url
 
 
+def extract_company(source, title, description):
+    """Extract company name from email data for dedup purposes.
+    Returns a normalised company string, or None if not extractable."""
+    if not description:
+        return None
+
+    source_lower = source.lower()
+
+    # LinkedIn: description is "Company · Location, extra info"
+    if "linkedin" in source_lower:
+        parts = description.split("·")
+        if len(parts) >= 1:
+            return parts[0].strip().lower()
+
+    # Indeed: description is "Company, Location, Salary, ..."
+    if "indeed" in source_lower:
+        parts = description.split(",")
+        if len(parts) >= 1:
+            return parts[0].strip().lower()
+
+    return None
+
+
+def make_dedup_key(source, title, description):
+    """Build a dedup key from title + company + source for LinkedIn/Indeed.
+    Returns a key string, or None if dedup isn't possible for this source."""
+    source_lower = source.lower()
+
+    # Only dedup LinkedIn and Indeed — skip Totaljobs and others
+    if not ("linkedin" in source_lower or "indeed" in source_lower):
+        return None
+
+    company = extract_company(source, title, description)
+    if not company:
+        return None
+
+    title_norm = title.strip().lower()
+    # Include a source tag so "Digital Lead" at "Acme" from LinkedIn
+    # stays separate from the same combo from Indeed
+    if "linkedin" in source_lower:
+        src_tag = "linkedin"
+    else:
+        src_tag = "indeed"
+
+    return f"{src_tag}|{title_norm}|{company}"
+
+
 def clean_sender(sender):
     """Extract a readable name from the From header."""
     # "John Doe <john@example.com>" → "John Doe"
@@ -351,6 +398,8 @@ def main():
     # Process each email
     all_entries = []
     seen_urls = set()
+    seen_roles = set()  # title+company+source dedup for LinkedIn/Indeed
+    dedup_count = 0
 
     for msg in messages:
         details = get_email_details(service, msg["id"])
@@ -368,9 +417,21 @@ def main():
             # Check keyword match
             for keyword in keywords:
                 if matches_keywords(url, link_text, [keyword]):
+                    title = link_text or details["subject"]
+
+                    # For LinkedIn/Indeed: dedup on title + company + source
+                    # The description comes from link_text splitting done later,
+                    # but we can parse it here from the raw link_text
+                    dedup_key = make_dedup_key(sender, title, link_text)
+                    if dedup_key:
+                        if dedup_key in seen_roles:
+                            dedup_count += 1
+                            break  # Skip this duplicate
+                        seen_roles.add(dedup_key)
+
                     seen_urls.add(norm_url)
                     all_entries.append({
-                        "title": link_text or details["subject"],
+                        "title": title,
                         "url": url,
                         "source": sender,
                         "date": email_date,
@@ -379,6 +440,8 @@ def main():
                     break  # One match is enough
 
     print(f"\nFiltered to {len(all_entries)} link(s) matching keywords")
+    if dedup_count:
+        print(f"Removed {dedup_count} duplicate role(s) from LinkedIn/Indeed")
 
     # Generate output
     filepath = generate_markdown(date_label, all_entries, output_folder)
