@@ -10,6 +10,7 @@ import sys
 import json
 import re
 import base64
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse, unquote, urlencode, parse_qs
@@ -28,6 +29,65 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 CREDENTIALS_FILE = SCRIPT_DIR / "credentials.json"
 TOKEN_FILE = SCRIPT_DIR / "token.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
+DEDUP_DB_FILE = SCRIPT_DIR / "seen_jobs.db"
+
+# How long to remember seen jobs before they expire (days)
+DEDUP_EXPIRY_DAYS = 90
+
+
+class DeduplicationDB:
+    """SQLite-backed dedup store, scoped per platform with automatic expiry."""
+
+    def __init__(self, db_path=DEDUP_DB_FILE, expiry_days=DEDUP_EXPIRY_DAYS):
+        self.conn = sqlite3.connect(str(db_path))
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._create_table()
+        self._purge_expired(expiry_days)
+
+    def _create_table(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS seen_jobs (
+                platform TEXT NOT NULL,
+                dedup_key TEXT NOT NULL,
+                first_seen DATE NOT NULL DEFAULT (date('now')),
+                PRIMARY KEY (platform, dedup_key)
+            )
+        """)
+        self.conn.commit()
+
+    def _purge_expired(self, expiry_days):
+        """Remove entries older than expiry_days."""
+        cutoff = (datetime.now() - timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+        self.conn.execute("DELETE FROM seen_jobs WHERE first_seen < ?", (cutoff,))
+        self.conn.commit()
+
+    def has_seen(self, platform, dedup_key):
+        """Check if this dedup_key has been seen for the given platform."""
+        cursor = self.conn.execute(
+            "SELECT 1 FROM seen_jobs WHERE platform = ? AND dedup_key = ?",
+            (platform, dedup_key),
+        )
+        return cursor.fetchone() is not None
+
+    def mark_seen(self, platform, dedup_key):
+        """Record a dedup_key as seen for the given platform."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO seen_jobs (platform, dedup_key) VALUES (?, ?)",
+            (platform, dedup_key),
+        )
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+    def stats(self):
+        """Return count of entries per platform."""
+        cursor = self.conn.execute(
+            "SELECT platform, COUNT(*) FROM seen_jobs GROUP BY platform"
+        )
+        return dict(cursor.fetchall())
 
 
 def load_config():
@@ -488,11 +548,20 @@ def main():
     messages = fetch_emails(service, label_id, after_date, before_date)
     print(f"Found {len(messages)} email(s) with label '{label_name}'")
 
+    # Open dedup database (persists across runs)
+    dedup_db = DeduplicationDB()
+    db_stats = dedup_db.stats()
+    if db_stats:
+        print(f"Dedup DB loaded: {', '.join(f'{p}: {c} entries' for p, c in db_stats.items())}")
+    else:
+        print("Dedup DB: empty (first run)")
+
     # Process each email
     all_entries = []
-    seen_urls = set()
-    seen_roles = set()  # title+company+source dedup for LinkedIn/Indeed/TotalJobs
-    dedup_count = 0
+    seen_urls = set()       # within-run URL dedup
+    seen_roles = set()      # within-run title+company+source dedup
+    dedup_count_within = 0  # duplicates caught within this run
+    dedup_count_cross = 0   # duplicates caught from previous runs
 
     for msg in messages:
         details = get_email_details(service, msg["id"])
@@ -524,9 +593,19 @@ def main():
                     # Dedup on title + company + source
                     dedup_key = make_dedup_key(sender, title, link_text, company_override=tj_company)
                     if dedup_key:
+                        # Extract platform tag for DB scoping
+                        platform = dedup_key.split("|", 1)[0]
+
+                        # Check within-run dedup first
                         if dedup_key in seen_roles:
-                            dedup_count += 1
+                            dedup_count_within += 1
                             break  # Skip this duplicate
+
+                        # Check cross-run dedup from DB
+                        if dedup_db.has_seen(platform, dedup_key):
+                            dedup_count_cross += 1
+                            break  # Skip — seen in a previous run
+
                         seen_roles.add(dedup_key)
 
                     # Build description from TotalJobs metadata
@@ -551,12 +630,24 @@ def main():
                         "date": email_date,
                         "matched_keyword": keyword,
                         "description": description,
+                        "_dedup_key": dedup_key,  # carried for DB storage
                     })
                     break  # One match is enough
 
+    # Store new entries in dedup DB
+    for entry in all_entries:
+        dk = entry.pop("_dedup_key", None)
+        if dk:
+            platform = dk.split("|", 1)[0]
+            dedup_db.mark_seen(platform, dk)
+    dedup_db.commit()
+    dedup_db.close()
+
     print(f"\nFiltered to {len(all_entries)} link(s) matching keywords")
-    if dedup_count:
-        print(f"Removed {dedup_count} duplicate role(s) from LinkedIn/Indeed/TotalJobs")
+    if dedup_count_within:
+        print(f"Removed {dedup_count_within} duplicate(s) within this run")
+    if dedup_count_cross:
+        print(f"Removed {dedup_count_cross} duplicate(s) seen in previous runs")
 
     # Generate output
     filepath = generate_markdown(date_label, all_entries, output_folder)
