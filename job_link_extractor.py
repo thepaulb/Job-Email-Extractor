@@ -180,65 +180,97 @@ def extract_links(email_details):
     return list(links)
 
 
-def extract_totaljobs_companies(body_html):
-    """Extract a mapping of job URL → company name from TotalJobs digest emails.
+def _find_totaljobs_container(element):
+    """Walk up from an element to find the TotalJobs job-listing table
+    (bordered table with border-radius:18px)."""
+    container = element
+    for _ in range(15):
+        container = container.parent
+        if container is None:
+            break
+        if container.name == "table":
+            style = (container.get("style") or "").replace(" ", "")
+            if "border-radius:18px" in style:
+                return container
+    return None
 
-    TotalJobs HTML puts each job in a bordered table. Company names appear in a
-    <span> next to <img alt="company"> elements. We walk up to the containing
-    table and find the job title link to build the mapping.
+
+def _find_totaljobs_url(container):
+    """Find the job title URL inside a TotalJobs listing container."""
+    # Primary: <a> containing <strong> with font-size:18px
+    for a_tag in container.find_all("a", href=True):
+        strong = a_tag.find("strong")
+        if strong:
+            strong_style = (strong.get("style") or "").replace(" ", "")
+            if "font-size:18px" in strong_style:
+                return a_tag["href"].strip()
+    # Fallback: first <a> with a totaljobs href
+    for a_tag in container.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        if href.startswith(("http://", "https://")) and "totaljobs" in href.lower():
+            return href
+    return None
+
+
+def extract_totaljobs_metadata(body_html):
+    """Extract a mapping of job URL → metadata dict from TotalJobs digest emails.
+
+    TotalJobs HTML puts each job in a bordered table. Metadata items (company,
+    location, contract type, salary) each appear as <img alt="key"> followed by
+    a <span> with the value. We collect all metadata per job listing.
+
+    Returns: {url: {"company": str, "location": str, "contract": str, "salary": str}}
     """
     if not body_html:
         return {}
 
     soup = BeautifulSoup(body_html, "html.parser")
-    url_to_company = {}
+    url_to_meta = {}
 
-    # Find all company icon markers
+    # Known icon alt attributes → metadata field names
+    # TotalJobs uses these alt values on <img> icons next to each spec
+    alt_to_field = {
+        "company": "company",
+        "location": "location",
+        "salary": "salary",
+        # Contract type icon — try common alt values
+        "contract": "contract",
+        "job-type": "contract",
+        "job type": "contract",
+        "type": "contract",
+        "jobtype": "contract",
+    }
+
+    # Find all bordered job-listing tables, then extract metadata from each
+    # We anchor on <img alt="company"> since every listing has one
     company_imgs = soup.find_all("img", alt="company")
 
-    for img in company_imgs:
-        # Company name is in the next <span> sibling
-        company_span = img.find_next("span")
-        if not company_span:
-            continue
-        company_name = company_span.get_text(strip=True)
-        if not company_name:
+    for company_img in company_imgs:
+        container = _find_totaljobs_container(company_img)
+        if not container:
             continue
 
-        # Walk up to find the containing bordered table for this job listing
-        container = img
-        for _ in range(15):
-            container = container.parent
-            if container is None:
-                break
-            if container.name == "table":
-                style = (container.get("style") or "").replace(" ", "")
-                if "border-radius:18px" in style or "border-radius: 18px" in style.replace(" ", ""):
-                    break
+        job_url = _find_totaljobs_url(container)
+        if not job_url:
+            continue
 
-        if container and container.name == "table":
-            # Find the job title link — it's the <a> containing <strong> with font-size:18px
-            job_url = None
-            for a_tag in container.find_all("a", href=True):
-                strong = a_tag.find("strong")
-                if strong:
-                    strong_style = (strong.get("style") or "").replace(" ", "")
-                    if "font-size:18px" in strong_style:
-                        job_url = a_tag["href"].strip()
-                        break
+        # Collect all metadata from icon+span pairs within this container
+        meta = {}
+        for img in container.find_all("img", alt=True):
+            alt = img["alt"].strip().lower()
+            field = alt_to_field.get(alt)
+            if not field:
+                continue
+            span = img.find_next("span")
+            if span:
+                value = span.get_text(strip=True)
+                if value and field not in meta:
+                    meta[field] = value
 
-            if not job_url:
-                # Fallback: first <a> with an http href containing "totaljobs"
-                for a_tag in container.find_all("a", href=True):
-                    href = a_tag["href"].strip()
-                    if href.startswith(("http://", "https://")) and "totaljobs" in href.lower():
-                        job_url = href
-                        break
+        if meta:
+            url_to_meta[job_url] = meta
 
-            if job_url:
-                url_to_company[job_url] = company_name
-
-    return url_to_company
+    return url_to_meta
 
 
 def matches_keywords(url, link_text, keywords):
@@ -386,12 +418,14 @@ def generate_markdown(date_label, entries, output_folder):
             for i, entry in enumerate(entries, 1):
                 desc = None
                 title = entry["title"] if entry["title"] else "Untitled Link"
-                # Format title if Indeed text contains source 
-                # info (e.g. "Indeed, Software Engineer at XYZ")
-                if "Indeed" in entry['source'] or "LinkedIn" in entry['source']:
+                # Use pre-built description for TotalJobs; split from
+                # link text for Indeed/LinkedIn
+                if entry.get("description"):
+                    desc = entry["description"]
+                elif "Indeed" in entry['source'] or "LinkedIn" in entry['source']:
                     title, *desc = title.split(", ", 1)
                     desc = desc[0].lstrip() if desc else None
-  
+
                 f.write(f"### {i}. {title}\n\n")
                 f.write(f"**Description:** {desc}\n\n") if desc else "\n"
                 f.write(f"- **Source:** {entry['source']}\n")
@@ -467,10 +501,10 @@ def main():
         sender = clean_sender(details["sender"])
         email_date = parse_email_date(details["date"])
 
-        # For TotalJobs emails, extract company names from the HTML structure
-        totaljobs_companies = {}
+        # For TotalJobs emails, extract metadata from the HTML structure
+        totaljobs_meta = {}
         if "totaljobs" in sender.lower():
-            totaljobs_companies = extract_totaljobs_companies(details["body_html"])
+            totaljobs_meta = extract_totaljobs_metadata(details["body_html"])
 
         for url, link_text in links:
             # Skip duplicates (using normalized URL for comparison)
@@ -483,8 +517,9 @@ def main():
                 if matches_keywords(url, link_text, [keyword]):
                     title = link_text or details["subject"]
 
-                    # Look up TotalJobs company from HTML if available
-                    tj_company = totaljobs_companies.get(url, "").strip().lower() or None
+                    # Look up TotalJobs metadata from HTML if available
+                    tj_meta = totaljobs_meta.get(url, {})
+                    tj_company = tj_meta.get("company", "").strip().lower() or None
 
                     # Dedup on title + company + source
                     dedup_key = make_dedup_key(sender, title, link_text, company_override=tj_company)
@@ -494,6 +529,20 @@ def main():
                             break  # Skip this duplicate
                         seen_roles.add(dedup_key)
 
+                    # Build description from TotalJobs metadata
+                    description = ""
+                    if tj_meta:
+                        desc_parts = []
+                        if tj_meta.get("company"):
+                            desc_parts.append(tj_meta["company"])
+                        if tj_meta.get("location"):
+                            desc_parts.append(tj_meta["location"])
+                        if tj_meta.get("contract"):
+                            desc_parts.append(tj_meta["contract"])
+                        if tj_meta.get("salary"):
+                            desc_parts.append(tj_meta["salary"])
+                        description = ", ".join(desc_parts)
+
                     seen_urls.add(norm_url)
                     all_entries.append({
                         "title": title,
@@ -501,6 +550,7 @@ def main():
                         "source": sender,
                         "date": email_date,
                         "matched_keyword": keyword,
+                        "description": description,
                     })
                     break  # One match is enough
 
