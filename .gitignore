@@ -1,6 +1,8 @@
 .DS_Store
 credentials.json
 seen_jobs.db
+seen_jobs.db-wal
+seen_jobs.db-shm
 daily_jobs/
 GMAIL_API_SETUP.md
 token.json
