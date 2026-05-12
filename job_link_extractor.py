@@ -180,6 +180,67 @@ def extract_links(email_details):
     return list(links)
 
 
+def extract_totaljobs_companies(body_html):
+    """Extract a mapping of job URL → company name from TotalJobs digest emails.
+
+    TotalJobs HTML puts each job in a bordered table. Company names appear in a
+    <span> next to <img alt="company"> elements. We walk up to the containing
+    table and find the job title link to build the mapping.
+    """
+    if not body_html:
+        return {}
+
+    soup = BeautifulSoup(body_html, "html.parser")
+    url_to_company = {}
+
+    # Find all company icon markers
+    company_imgs = soup.find_all("img", alt="company")
+
+    for img in company_imgs:
+        # Company name is in the next <span> sibling
+        company_span = img.find_next("span")
+        if not company_span:
+            continue
+        company_name = company_span.get_text(strip=True)
+        if not company_name:
+            continue
+
+        # Walk up to find the containing bordered table for this job listing
+        container = img
+        for _ in range(15):
+            container = container.parent
+            if container is None:
+                break
+            if container.name == "table":
+                style = (container.get("style") or "").replace(" ", "")
+                if "border-radius:18px" in style or "border-radius: 18px" in style.replace(" ", ""):
+                    break
+
+        if container and container.name == "table":
+            # Find the job title link — it's the <a> containing <strong> with font-size:18px
+            job_url = None
+            for a_tag in container.find_all("a", href=True):
+                strong = a_tag.find("strong")
+                if strong:
+                    strong_style = (strong.get("style") or "").replace(" ", "")
+                    if "font-size:18px" in strong_style:
+                        job_url = a_tag["href"].strip()
+                        break
+
+            if not job_url:
+                # Fallback: first <a> with an http href containing "totaljobs"
+                for a_tag in container.find_all("a", href=True):
+                    href = a_tag["href"].strip()
+                    if href.startswith(("http://", "https://")) and "totaljobs" in href.lower():
+                        job_url = href
+                        break
+
+            if job_url:
+                url_to_company[job_url] = company_name
+
+    return url_to_company
+
+
 def matches_keywords(url, link_text, keywords):
     """Check if a URL or its link text matches any of the keywords.
 
@@ -249,27 +310,25 @@ def extract_company(source, title, description):
     return None
 
 
-def make_dedup_key(source, title, description):
-    """Build a dedup key from title + company + source for LinkedIn/Indeed.
+def make_dedup_key(source, title, description, company_override=None):
+    """Build a dedup key from title + company + source for LinkedIn/Indeed/TotalJobs.
     Returns a key string, or None if dedup isn't possible for this source."""
     source_lower = source.lower()
 
-    # Only dedup LinkedIn and Indeed — skip Totaljobs and others
-    if not ("linkedin" in source_lower or "indeed" in source_lower):
+    if "linkedin" in source_lower:
+        src_tag = "linkedin"
+    elif "indeed" in source_lower:
+        src_tag = "indeed"
+    elif "totaljobs" in source_lower:
+        src_tag = "totaljobs"
+    else:
         return None
 
-    company = extract_company(source, title, description)
+    company = company_override or extract_company(source, title, description)
     if not company:
         return None
 
     title_norm = title.strip().lower()
-    # Include a source tag so "Digital Lead" at "Acme" from LinkedIn
-    # stays separate from the same combo from Indeed
-    if "linkedin" in source_lower:
-        src_tag = "linkedin"
-    else:
-        src_tag = "indeed"
-
     return f"{src_tag}|{title_norm}|{company}"
 
 
@@ -398,7 +457,7 @@ def main():
     # Process each email
     all_entries = []
     seen_urls = set()
-    seen_roles = set()  # title+company+source dedup for LinkedIn/Indeed
+    seen_roles = set()  # title+company+source dedup for LinkedIn/Indeed/TotalJobs
     dedup_count = 0
 
     for msg in messages:
@@ -407,6 +466,11 @@ def main():
 
         sender = clean_sender(details["sender"])
         email_date = parse_email_date(details["date"])
+
+        # For TotalJobs emails, extract company names from the HTML structure
+        totaljobs_companies = {}
+        if "totaljobs" in sender.lower():
+            totaljobs_companies = extract_totaljobs_companies(details["body_html"])
 
         for url, link_text in links:
             # Skip duplicates (using normalized URL for comparison)
@@ -419,10 +483,11 @@ def main():
                 if matches_keywords(url, link_text, [keyword]):
                     title = link_text or details["subject"]
 
-                    # For LinkedIn/Indeed: dedup on title + company + source
-                    # The description comes from link_text splitting done later,
-                    # but we can parse it here from the raw link_text
-                    dedup_key = make_dedup_key(sender, title, link_text)
+                    # Look up TotalJobs company from HTML if available
+                    tj_company = totaljobs_companies.get(url, "").strip().lower() or None
+
+                    # Dedup on title + company + source
+                    dedup_key = make_dedup_key(sender, title, link_text, company_override=tj_company)
                     if dedup_key:
                         if dedup_key in seen_roles:
                             dedup_count += 1
@@ -441,7 +506,7 @@ def main():
 
     print(f"\nFiltered to {len(all_entries)} link(s) matching keywords")
     if dedup_count:
-        print(f"Removed {dedup_count} duplicate role(s) from LinkedIn/Indeed")
+        print(f"Removed {dedup_count} duplicate role(s) from LinkedIn/Indeed/TotalJobs")
 
     # Generate output
     filepath = generate_markdown(date_label, all_entries, output_folder)
