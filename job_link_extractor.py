@@ -359,6 +359,43 @@ def matches_keywords(url, link_text, keywords):
     return False
 
 
+def build_keyword_groups(keywords, aliases):
+    """Expand each keyword with its aliases for matching.
+
+    Returns a list of (canonical, [search_terms]) tuples where:
+    - canonical is the keyword as written in config (used in output)
+    - search_terms is the full list of strings to match against
+
+    If a keyword also appears as an alias of another keyword in the list,
+    it is merged into that group rather than appearing separately.
+    """
+    # Build a map from any lowercased term -> lowercased canonical
+    alias_map = {}
+    alias_groups = {}  # lower_canonical -> set of all lower terms
+
+    for canonical, variants in (aliases or {}).items():
+        lower_canonical = canonical.lower()
+        all_terms = {lower_canonical} | {v.lower() for v in variants}
+        alias_groups[lower_canonical] = all_terms
+        for term in all_terms:
+            alias_map[term] = lower_canonical
+
+    seen = set()
+    result = []
+    for kw in keywords:
+        kw_lower = kw.lower()
+        group_canonical = alias_map.get(kw_lower, kw_lower)
+
+        if group_canonical in seen:
+            continue  # already covered by an earlier keyword in the list
+        seen.add(group_canonical)
+
+        search_terms = list(alias_groups.get(group_canonical, {kw_lower}))
+        result.append((kw, search_terms))
+
+    return result
+
+
 def normalize_url(url):
     """Normalize a URL for deduplication by stripping tracking parameters.
     For LinkedIn job URLs, extract just the job ID."""
@@ -502,6 +539,7 @@ def main():
     config = load_config()
     label_name = config["gmail_label"]
     keywords = config["keywords"]
+    keyword_groups = build_keyword_groups(keywords, config.get("keyword_aliases", {}))
     output_folder = config.get("output_folder", "daily_jobs")
     lookback_days = config.get("lookback_days", 1)
 
@@ -582,8 +620,9 @@ def main():
                 continue
 
             # Check keyword match
-            for keyword in keywords:
-                if matches_keywords(url, link_text, [keyword]):
+            for canonical, search_terms in keyword_groups:
+                keyword = canonical
+                if matches_keywords(url, link_text, search_terms):
                     title = link_text or details["subject"]
 
                     # Look up TotalJobs metadata from HTML if available
